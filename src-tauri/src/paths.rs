@@ -9,7 +9,14 @@ fn portable_app_home() -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
     }
-    Some(PathBuf::from(raw))
+    let path = PathBuf::from(raw);
+    // A portable home must be absolute: a relative path would resolve against
+    // whatever directory the process happened to launch from and scatter app
+    // data across machines.
+    if path.is_relative() {
+        return None;
+    }
+    Some(path)
 }
 
 /// Home dir without panicking: a headless/odd environment falls back to the

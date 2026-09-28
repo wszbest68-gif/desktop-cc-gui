@@ -205,8 +205,13 @@ pub async fn plugin_window_set_normal_bounds(
     // On Windows, WebView window geometry is exposed in logical pixels even
     // when the plugin contract is physical pixels. Convert the requested
     // physical geometry through the window's current scale factor so the
-    // observable outer bounds remain stable at 125%/150% DPI.
+    // observable outer bounds remain stable at 125%/150% DPI. Other platforms
+    // already report physical pixels, where applying the factor again would
+    // double-scale the window (2x on Retina macOS) — hence Windows-only.
+    #[cfg(windows)]
     let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    #[cfg(not(windows))]
+    let scale = 1.0_f64;
     let physical_i32 = |value: i32| -> i32 { ((value as f64) * scale).round() as i32 };
     let physical_u32 = |value: u32| -> u32 { ((value as f64) * scale).round() as u32 };
     // Physical coordinates avoid silently applying the primary monitor's DPI
@@ -223,29 +228,9 @@ pub async fn plugin_window_set_normal_bounds(
             physical_i32(bounds.y),
         )))
         .map_err(|error| error.to_string())?;
-    // Re-center using the actual outer frame after DPI conversion. This keeps
-    // the complete window (title bar included) centered across monitor scales.
-    let outer = window.outer_size().map_err(|error| error.to_string())?;
-    let monitor = monitors
-        .iter()
-        .find(|monitor| {
-            let p = monitor.position();
-            let s = monitor.size();
-            let x = physical_i32(bounds.x);
-            let y = physical_i32(bounds.y);
-            x >= p.x && x < p.x + s.width as i32 && y >= p.y && y < p.y + s.height as i32
-        })
-        .or_else(|| monitors.first())
-        .ok_or_else(|| "no connected monitor is available".to_string())?;
-    let mp = monitor.position();
-    let ms = monitor.size();
-    let centered = tauri::PhysicalPosition::new(
-        mp.x + ((ms.width as i32 - outer.width as i32) / 2).max(0),
-        mp.y + ((ms.height as i32 - outer.height as i32) / 2).max(0),
-    );
-    window
-        .set_position(tauri::Position::Physical(centered))
-        .map_err(|error| error.to_string())?;
+    // The requested position is honored as validated: plugins pair this with
+    // sampleWechat() to dock the main window, so re-centering here would
+    // silently discard the contract's x/y.
     plugin_window_state(app, plugin_id).await
 }
 
@@ -264,13 +249,20 @@ fn select_wechat_candidate(
             let name = std::path::Path::new(&executable)
                 .file_name()
                 .and_then(|value| value.to_str())?;
-            if (name.eq_ignore_ascii_case("Weixin.exe") || name.eq_ignore_ascii_case("WeChat.exe"))
-                && bounds.width >= 480
-                && bounds.height >= 360
-            {
+            // Report the canonical casing: the SDK types this field as the
+            // literal union "Weixin.exe" | "WeChat.exe", while the on-disk
+            // name may differ in case.
+            let canonical = if name.eq_ignore_ascii_case("Weixin.exe") {
+                "Weixin.exe"
+            } else if name.eq_ignore_ascii_case("WeChat.exe") {
+                "WeChat.exe"
+            } else {
+                return None;
+            };
+            if bounds.width >= 480 && bounds.height >= 360 {
                 Some(PluginWechatWindow {
                     bounds,
-                    executable: name.to_string(),
+                    executable: canonical.to_string(),
                 })
             } else {
                 None
@@ -394,7 +386,11 @@ pub async fn plugin_list_engine_models(
     if !engines.iter().any(|entry| entry.id == engine) {
         return Err(format!("unknown engine: {engine}"));
     }
-    crate::engine::models::list_engine_models(state, engine, workspace).await
+    // Error strings from the engine layer may embed endpoint URLs; plugins
+    // get the same sanitized message as the aggregate catalog.
+    crate::engine::models::list_engine_models(state, engine, workspace)
+        .await
+        .map_err(|_| "model catalog unavailable".to_string())
 }
 
 fn configured_model(id: String, provider: String) -> crate::engine::models::EngineModel {
@@ -457,6 +453,76 @@ fn model_source(
         refreshed_at,
         detail,
     }
+}
+
+/// Per-engine provider sources: configured models offline by default; a live
+/// refresh happens only on explicit request and failures degrade to the
+/// configured list plus a sanitized error — URLs, keys, and upstream error
+/// text never cross the plugin boundary.
+async fn provider_model_sources(
+    engine_id: &str,
+    section: &crate::config::ProviderSection,
+    refresh_providers: bool,
+    refreshed_at: u64,
+    errors: &mut Vec<PluginModelCatalogError>,
+) -> Vec<PluginModelSource> {
+    let mut sources = Vec::new();
+    for (provider_id, provider) in &section.providers {
+        if provider_id == crate::config::LOCAL_PROVIDER_ID
+            || provider_id == crate::config::DISABLED_PROVIDER_ID
+        {
+            continue;
+        }
+        let probe = crate::provider_files::safe_provider_probe_config(engine_id, provider);
+        let mut provider_models = probe
+            .configured_model
+            .into_iter()
+            .map(|id| configured_model(id, provider_id.clone()))
+            .collect::<Vec<_>>();
+        let mut detail = None;
+        if refresh_providers {
+            if let Some(base_url) = probe.base_url.filter(|value| !value.trim().is_empty()) {
+                match crate::provider_models::fetch_provider_models_inner(
+                    base_url,
+                    probe.api_key.unwrap_or_default(),
+                )
+                .await
+                {
+                    Ok(list) => {
+                        provider_models = list
+                            .models
+                            .into_iter()
+                            .map(|id| configured_model(id, provider_id.clone()))
+                            .collect();
+                    }
+                    Err(_) => {
+                        detail = Some(
+                            "provider refresh failed; returning configured models".to_string(),
+                        );
+                        errors.push(PluginModelCatalogError {
+                            engine: engine_id.to_string(),
+                            source_id: Some(provider_id.clone()),
+                            message: "provider model refresh failed",
+                        });
+                    }
+                }
+            } else {
+                detail =
+                    Some("no refresh endpoint configured; returning configured models".to_string());
+            }
+        }
+        sources.push(model_source(
+            provider_id.clone(),
+            probe.name,
+            "provider",
+            provider_models,
+            false,
+            false,
+            refreshed_at,
+            detail,
+        ));
+    }
+    sources
 }
 
 #[tauri::command]
@@ -543,61 +609,16 @@ pub async fn plugin_model_catalog(
                 ));
             }
             if let Some(section) = config.section(&engine_id) {
-                for (provider_id, provider) in &section.providers {
-                    if provider_id == crate::config::LOCAL_PROVIDER_ID
-                        || provider_id == crate::config::DISABLED_PROVIDER_ID
-                    {
-                        continue;
-                    }
-                    let probe =
-                        crate::provider_files::safe_provider_probe_config(&engine_id, provider);
-                    let mut provider_models = probe
-                        .configured_model
-                        .into_iter()
-                        .map(|id| configured_model(id, provider_id.clone()))
-                        .collect::<Vec<_>>();
-                    let mut detail = None;
-                    if refresh_providers {
-                        if let Some(base_url) =
-                            probe.base_url.filter(|value| !value.trim().is_empty())
-                        {
-                            match crate::provider_models::fetch_provider_models_inner(
-                                base_url,
-                                probe.api_key.unwrap_or_default(),
-                            )
-                            .await
-                            {
-                                Ok(list) => {
-                                    provider_models = list
-                                        .models
-                                        .into_iter()
-                                        .map(|id| configured_model(id, provider_id.clone()))
-                                        .collect();
-                                }
-                                Err(_) => {
-                                    detail = Some("实时刷新失败，返回已配置模型".to_string());
-                                    result.errors.push(PluginModelCatalogError {
-                                        engine: engine_id.clone(),
-                                        source_id: Some(provider_id.clone()),
-                                        message: "provider model refresh failed",
-                                    });
-                                }
-                            }
-                        } else {
-                            detail = Some("未配置可用刷新地址，返回已配置模型".to_string());
-                        }
-                    }
-                    sources.push(model_source(
-                        provider_id.clone(),
-                        probe.name,
-                        "provider",
-                        provider_models,
-                        false,
-                        false,
+                sources.extend(
+                    provider_model_sources(
+                        &engine_id,
+                        section,
+                        refresh_providers,
                         refreshed_at,
-                        detail,
-                    ));
-                }
+                        &mut result.errors,
+                    )
+                    .await,
+                );
             }
         }
         result
@@ -629,11 +650,12 @@ mod tests {
                 bounds(470, 350),
             ),
             (
-                "C:/Program Files/Tencent/Weixin.exe".to_string(),
+                "C:/Program Files/Tencent/WEIXIN.EXE".to_string(),
                 bounds(1000, 800),
             ),
         ])
         .unwrap();
+        // On-disk casing is normalized to the SDK's literal union member.
         assert_eq!(selected.executable, "Weixin.exe");
         assert_eq!(selected.bounds, bounds(1000, 800));
     }
