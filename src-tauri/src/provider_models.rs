@@ -105,7 +105,8 @@ fn extract_model_ids(value: &Value) -> Vec<String> {
 
 /// GET the channel's model list. The key rides both auth headers — OpenAI
 /// relays read `Authorization: Bearer`, Anthropic relays read `x-api-key`.
-#[tauri::command]
+/// Shared by the `fetch_provider_models` command and the plugin model
+/// catalog; not itself a command.
 pub(crate) async fn fetch_provider_models_inner(
     base_url: String,
     api_key: String,

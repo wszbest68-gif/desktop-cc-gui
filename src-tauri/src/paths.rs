@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-fn portable_app_home() -> Option<PathBuf> {
+fn read_portable_app_home() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let path = exe_dir.join("portable-data.json");
     let text = std::fs::read_to_string(path).ok()?;
@@ -18,6 +18,13 @@ fn portable_app_home() -> Option<PathBuf> {
     }
     Some(path)
 }
+
+/// Portable-mode home, resolved once: portable mode is decided at launch (the
+/// pointer file sits next to the exe), and app_home() has ~40 callers —
+/// several on per-IPC paths — so an uncached disk read + JSON parse on every
+/// call is pure waste.
+static PORTABLE_HOME: std::sync::LazyLock<Option<PathBuf>> =
+    std::sync::LazyLock::new(read_portable_app_home);
 
 /// Home dir without panicking: a headless/odd environment falls back to the
 /// current directory so startup degrades instead of crashing.
@@ -51,8 +58,8 @@ pub(crate) static HOME_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::ne
 
 /// Application home directory: ~/.ccgui-next/
 pub fn app_home() -> PathBuf {
-    if let Some(path) = portable_app_home() {
-        return path;
+    if let Some(path) = PORTABLE_HOME.as_ref() {
+        return path.clone();
     }
     home_dir().join(".ccgui-next")
 }

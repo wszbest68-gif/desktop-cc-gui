@@ -146,6 +146,20 @@ fn validate_window_bounds(
     validate_window_bounds_against_rects(bounds, &rects)
 }
 
+/// Convert contract physical geometry through the platform DPI quirk.
+/// Windows WebView2 geometry is logical even via the Physical size/position
+/// APIs, so the host multiplies by the window scale factor (scale is 1.0
+/// elsewhere — see plugin_window_set_normal_bounds). Kept as pure functions
+/// so the scaling math — including getState → setNormalBounds roundtrip
+/// symmetry — is testable without a windowing system.
+fn dpi_scale_i32(value: i32, scale: f64) -> i32 {
+    ((value as f64) * scale).round() as i32
+}
+
+fn dpi_scale_u32(value: u32, scale: f64) -> u32 {
+    ((value as f64) * scale).round() as u32
+}
+
 fn main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
     app.get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())
@@ -212,20 +226,18 @@ pub async fn plugin_window_set_normal_bounds(
     let scale = window.scale_factor().map_err(|error| error.to_string())?;
     #[cfg(not(windows))]
     let scale = 1.0_f64;
-    let physical_i32 = |value: i32| -> i32 { ((value as f64) * scale).round() as i32 };
-    let physical_u32 = |value: u32| -> u32 { ((value as f64) * scale).round() as u32 };
     // Physical coordinates avoid silently applying the primary monitor's DPI
     // to a position intended for a differently scaled secondary monitor.
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-            physical_u32(bounds.width),
-            physical_u32(bounds.height),
+            dpi_scale_u32(bounds.width, scale),
+            dpi_scale_u32(bounds.height, scale),
         )))
         .map_err(|error| error.to_string())?;
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            physical_i32(bounds.x),
-            physical_i32(bounds.y),
+            dpi_scale_i32(bounds.x, scale),
+            dpi_scale_i32(bounds.y, scale),
         )))
         .map_err(|error| error.to_string())?;
     // The requested position is honored as validated: plugins pair this with
@@ -708,6 +720,27 @@ mod tests {
     #[test]
     fn unsupported_error_is_explicit() {
         assert!(unsupported_platform_error().starts_with("Unsupported:"));
+    }
+
+    #[test]
+    fn dpi_scaling_is_identity_at_100_percent_and_symmetric_on_roundtrip() {
+        // 100% DPI (and all non-Windows platforms, where scale is 1.0) must
+        // leave contract pixels untouched.
+        assert_eq!(dpi_scale_u32(1280, 1.0), 1280);
+        assert_eq!(dpi_scale_i32(-100, 1.0), -100);
+        // 125%/150% scales multiply as documented.
+        assert_eq!(dpi_scale_u32(640, 1.25), 800);
+        assert_eq!(dpi_scale_i32(-100, 1.5), -150);
+        // Roundtrip symmetry: a value read back and converted the other way
+        // lands on the original for the scales Windows actually ships, so a
+        // getState → setNormalBounds cycle cannot accumulate drift.
+        for scale in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
+            for value in [640_u32, 800, 1024, 1280, 1920, 2560] {
+                let scaled = dpi_scale_u32(value, scale);
+                let back = ((scaled as f64) / scale).round() as u32;
+                assert_eq!(back, value, "scale {scale}, value {value}");
+            }
+        }
     }
 
     #[test]

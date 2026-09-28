@@ -2,6 +2,7 @@ import { ipc, type PluginInfo } from "@/lib/ipc";
 import i18n from "@/lib/i18n";
 import { buildAgentCatalog } from "../conversation/agent-catalog";
 import { getAppVersion } from "@/lib/platform";
+import { APP_VERSION } from "@/version/app-version";
 import { invoke } from "@/lib/transport";
 import {
   createPluginContext,
@@ -75,7 +76,7 @@ export const ipcBackend: LoaderBackend = {
   // A missing native version bridge must not turn every installed plugin into
   // a false `incompatible` result.  The fallback is the version of this host
   // build and is only used when the bridge is unavailable.
-  appVersion: async () => (await getAppVersion()) ?? "1.0.10",
+  appVersion: async () => (await getAppVersion()) ?? APP_VERSION,
   get: (id, key) => ipc.pluginStorageGet(id, key),
   set: (id, key, value) => ipc.pluginStorageSet(id, key, value),
   delete: (id, key) => ipc.pluginStorageDelete(id, key),
