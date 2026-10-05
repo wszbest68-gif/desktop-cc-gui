@@ -146,18 +146,13 @@ fn validate_window_bounds(
     validate_window_bounds_against_rects(bounds, &rects)
 }
 
-/// Convert contract physical geometry through the platform DPI quirk.
-/// Windows WebView2 geometry is logical even via the Physical size/position
-/// APIs, so the host multiplies by the window scale factor (scale is 1.0
-/// elsewhere — see plugin_window_set_normal_bounds). Kept as pure functions
-/// so the scaling math — including getState → setNormalBounds roundtrip
-/// symmetry — is testable without a windowing system.
-fn dpi_scale_i32(value: i32, scale: f64) -> i32 {
-    ((value as f64) * scale).round() as i32
-}
-
-fn dpi_scale_u32(value: u32, scale: f64) -> u32 {
-    ((value as f64) * scale).round() as u32
+/// Second-pass request size so the observable outer size lands on `target`:
+/// subtract however much the first request overshot (client-area sizing plus
+/// non-client chrome). Negative or zero results fall back to the target
+/// itself — a degenerate chrome larger than the window must not reach the OS.
+fn correct_for_chrome(target: u32, produced: u32) -> u32 {
+    let corrected = target as i64 - (produced as i64 - target as i64);
+    if corrected <= 0 { target } else { corrected as u32 }
 }
 
 fn main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
@@ -216,30 +211,35 @@ pub async fn plugin_window_set_normal_bounds(
         return Err("no connected monitor is available".to_string());
     }
     validate_window_bounds(bounds, &monitors)?;
-    // On Windows, WebView window geometry is exposed in logical pixels even
-    // when the plugin contract is physical pixels. Convert the requested
-    // physical geometry through the window's current scale factor so the
-    // observable outer bounds remain stable at 125%/150% DPI. Other platforms
-    // already report physical pixels, where applying the factor again would
-    // double-scale the window (2x on Retina macOS) — hence Windows-only.
-    #[cfg(windows)]
-    let scale = window.scale_factor().map_err(|error| error.to_string())?;
-    #[cfg(not(windows))]
-    let scale = 1.0_f64;
     // Physical coordinates avoid silently applying the primary monitor's DPI
     // to a position intended for a differently scaled secondary monitor.
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-            dpi_scale_u32(bounds.width, scale),
-            dpi_scale_u32(bounds.height, scale),
+            bounds.width,
+            bounds.height,
         )))
         .map_err(|error| error.to_string())?;
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            dpi_scale_i32(bounds.x, scale),
-            dpi_scale_i32(bounds.y, scale),
+            bounds.x,
+            bounds.y,
         )))
         .map_err(|error| error.to_string())?;
+    // Self-calibration: set_size targets the client area on Windows/WebView2,
+    // so the observable outer window lands larger by the non-client chrome
+    // (borders + title bar — the "missing 38px" at 100% DPI, ~47px at 125%).
+    // Measure the produced outer size and issue one corrected request so the
+    // outer bounds equal the contract values exactly, whatever the chrome.
+    let produced = window.outer_size().map_err(|error| error.to_string())?;
+    let fix_w = correct_for_chrome(bounds.width, produced.width);
+    let fix_h = correct_for_chrome(bounds.height, produced.height);
+    if fix_w != bounds.width || fix_h != bounds.height {
+        window
+            .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                fix_w, fix_h,
+            )))
+            .map_err(|error| error.to_string())?;
+    }
     // The requested position is honored as validated: plugins pair this with
     // sampleWechat() to dock the main window, so re-centering here would
     // silently discard the contract's x/y.
@@ -723,24 +723,21 @@ mod tests {
     }
 
     #[test]
-    fn dpi_scaling_is_identity_at_100_percent_and_symmetric_on_roundtrip() {
-        // 100% DPI (and all non-Windows platforms, where scale is 1.0) must
-        // leave contract pixels untouched.
-        assert_eq!(dpi_scale_u32(1280, 1.0), 1280);
-        assert_eq!(dpi_scale_i32(-100, 1.0), -100);
-        // 125%/150% scales multiply as documented.
-        assert_eq!(dpi_scale_u32(640, 1.25), 800);
-        assert_eq!(dpi_scale_i32(-100, 1.5), -150);
-        // Roundtrip symmetry: a value read back and converted the other way
-        // lands on the original for the scales Windows actually ships, so a
-        // getState → setNormalBounds cycle cannot accumulate drift.
-        for scale in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
-            for value in [640_u32, 800, 1024, 1280, 1920, 2560] {
-                let scaled = dpi_scale_u32(value, scale);
-                let back = ((scaled as f64) / scale).round() as u32;
-                assert_eq!(back, value, "scale {scale}, value {value}");
-            }
-        }
+    fn chrome_correction_lands_outer_on_target_and_degrades_safely() {
+        // Exact first pass (no chrome, or a platform where set_size is outer):
+        // the correction is the identity and no second request is issued.
+        assert_eq!(correct_for_chrome(980, 980), 980);
+        // Windows client-area sizing: requesting 980 produced 994 (borders)
+        // and 720 produced 758 (title bar) — the 2026-09-24 acceptance miss.
+        // The second pass requests target minus the overshoot.
+        assert_eq!(correct_for_chrome(980, 994), 966);
+        assert_eq!(correct_for_chrome(720, 758), 682);
+        // 125% DPI chrome (+18/+47 physical) corrects the same way.
+        assert_eq!(correct_for_chrome(1225, 1243), 1207);
+        assert_eq!(correct_for_chrome(900, 947), 853);
+        // A degenerate measurement (chrome larger than the target) must never
+        // reach the OS as a zero/underflowed size.
+        assert_eq!(correct_for_chrome(100, 400), 100);
     }
 
     #[test]
