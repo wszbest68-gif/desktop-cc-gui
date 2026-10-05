@@ -690,6 +690,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
+ "indexmap 1.9.3",
  "libc",
  "openssl-sys",
  "parking_lot",

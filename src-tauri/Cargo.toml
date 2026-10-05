@@ -11,6 +11,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# schemars 0.8 (tauri-build 传递依赖)把 indexmap 1.x 声明为 default-features=false,
+# 其 build script 靠 autocfg 探测 std;探测在当前环境失败会丢掉 IndexMap 的
+# `S = RandomState` 默认类型参数,导致 schemars 编译失败 (E0107)。显式启用 std
+# 让 build script 走 CARGO_FEATURE_STD 短路,跳过探测。
+indexmap = { version = "1.9", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "unstable", "macos-private-api"] }
