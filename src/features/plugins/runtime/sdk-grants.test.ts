@@ -16,6 +16,7 @@ describe("isKnownPermission", () => {
     // permission to spec/permissions.json must never stale-fail this test.
     expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(spec.knownPermissions.length);
     expect(isKnownPermission("ui:conversation-mode")).toBe(true);
+    expect(isKnownPermission("host:worktree")).toBe(true);
   });
 
   it("accepts well-shaped network: grants (bare host / port / port range)", () => {

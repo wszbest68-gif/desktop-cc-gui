@@ -1,6 +1,6 @@
 # @ccgui/plugin-sdk changelog
 
-## 0.3.16 — 2026-09-24
+## 0.3.19 — 2026-10-06
 - 新增权限 `host:window` 与 `ctx.window`：读取主窗口物理像素 bounds/state/DPI、
   在普通态经最小尺寸和多屏可见范围校验后设置 size+position，以及在 Windows
   按 `Weixin.exe` / `WeChat.exe` 可执行名采样微信主窗口。非 Windows 返回
@@ -10,11 +10,42 @@
   `list_engine_models` 权威实现，公开 engines、逐引擎 catalog 和聚合 catalog；
   保留 provider/contextWindow/authoritative/remote，显式排除 API key、token 与
   完整 provider 配置。模型 API 可经远程宿主执行；窗口 API 保持桌面专属。
-- 这些能力需要宿主 `minAppVersion: "1.0.10"`；SDK 契约升至 0.3.16。
+- 这些能力需要宿主 `minAppVersion: "1.0.10"`；SDK 契约升至 0.3.19。
 - `ctx.models.catalog({ workspace?, refreshProviders? })` 按引擎、来源部分成功，返回
   `engines[].sources[]`、`errors` 与 `refreshedAt`，并标注 CLI、中转渠道、自定义与默认模型来源。
   默认不联网；只有显式 `refreshProviders: true`（必须绑定用户手动动作）才刷新渠道
   模型。单个探针失败只返回脱敏错误，URL、key、响应体和底层错误均不外泄。
+## 0.3.18 — 2026-10-06
+- **新增 `ctx.sessions.startRun(def)` / `ctx.sessions.interruptRun(def)`**（权限
+  `host:session`）：把一个 AI 轮次跑成**宿主聊天会话**——会话立即进侧栏
+  （带运行中状态，无需手动同步）、打开即实时流式输出、聊天里的停止按钮
+  照常可用。`model` / `effort` / `providerId` 只覆盖这一轮（per-tab 覆盖），
+  不动用户的全局默认。spawn 成功后 resolve `{ runId, sessionId }`；终态经
+  `plugin-run://<pluginId>` 事件回执（`kind: "done" | "error"`）。
+  与 `ctx.agent.start` 分工：后者仍是插件自有后台轮次（事件只回插件、
+  不进聊天）；用户需要看见/接管的轮次用 `startRun`。
+- `ctx.agent.catalog()` 条目补充：`models[].provider` / `models[].description`
+  （插件可像宿主选择器一样按渠道分组）与 `efforts: string[]`（该引擎支持的
+  推理强度档位，空数组 = 不支持），便于插件做完整的三件套选择。
+
+## 0.3.17 — 2026-10-05
+- **新增能力 `host:worktree`**：`ctx.worktrees.create({ repoPath, parentWorkspaceId,
+  branch, baseRef?, prNumber?, prTitle?, prUrl?, existingBranch? })` 经宿主
+  「新建 Worktree」管线（validate → fetch → add → register）创建 worktree，
+  进度行、取消/重试、失败分类与侧栏注册全部复用宿主实现；成功 resolve
+  `{ worktreePath }`，失败/取消按 `errorKind: message` reject。`existingBranch`
+  复用宿主既有语义（检出已存在的本地分支）。路径缺省按宿主默认布局
+  `<仓库同级>/<仓库名>-worktrees/<branch>` 计算。
+- `ctx.workspaces.list()` 的工作区行新增只读 `worktree?` 投影
+  （`{ branch, prNumber? }`，来自 `meta.worktree`）——插件读得到 worktree
+  子行的分支与来源 PR，仍看不到 `meta` 里的其它私有载荷（如 wsl）。
+
+## 0.3.16 — 2026-10-05
+- `ctx.workspaces.list()`（沿用 `host:workspace` 权限）返回侧栏工作区快照：
+  `{ id, path, name, kind?, groupId, parentId?, lastOpenedAt }`。给插件做「按本机
+  工作区解析仓库 / 路径」这类只读用途（如 git-tasks 的仓库选择器只列用户
+  自己的工作区，而不是全部 GitHub 仓库）。刻意不含 `meta`（宿主与其它插件
+  写入的私有载荷）与分组定义；是快照而非订阅，需要跟随变更时重新调用。
 
 ## 0.3.15 — 2026-09-23
 - **payload 增强**：引擎事件 wire payload 新增 `genMs`（宿主实测生成窗口毫秒数）——只出现在 `usage` / `done` 事件上，计量该报告对应的模型

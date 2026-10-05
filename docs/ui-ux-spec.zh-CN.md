@@ -51,6 +51,7 @@
 - 用户可见文案一律从 `src/i18n/zh.ts`、`src/i18n/en.ts` 取，两个语言文件同步新增 key，组件里不写死中文。
 - 图标按钮必须同时有 `aria-label`（可访问名）和 `title`（指针悬停）。可访问名用**动作名**（"刷新"、"重新加载"），不用"点这里"。
 - 需要解释性文案、快捷键或多行说明时才用 `Tooltip`（`src/components/base/tooltip/tooltip.tsx`）：它基于 react-aria，trigger 必须是 react-aria 组件或包在 `Focusable` 里的元素；触屏上不可达，所以**关键信息不能只放在 tooltip 里**。
+- 原生 `title` 提示由 `NativeTitleTooltip`（`src/components/base/tooltip/native-title-tooltip.tsx`，挂在 `App.tsx`）全局接管：它监听 `document.body`（覆盖 portal 到 body 的右键菜单、对话框），把 `title` 文案搬进 `data-native-tooltip` 并置空原属性，改渲染与 `TooltipContent` 同一视觉的气泡（500ms 延迟、150ms 进入过渡、`z-[130]`，高于对话框 z-110 / 右键菜单 z-120），同时把文案复制为 `aria-description` 保住读屏描述。写控件时仍直接写 `title` 即可，不要手动操作 `data-native-tooltip`；Esc / 滚动 / 按下 / 目标卸载都会收起。
 
 ### 2.4 展开 / 收起动效
 
@@ -76,6 +77,7 @@
 - **排队行可上下调序**：排队卡片每行在发送 / 移除之外给「上移 / 下移」箭头（`message-queue.tsx` 的 `onMove` → store 的 `moveQueued(id, "up" | "down")`），仅在队列多于一行时渲染；首尾行各有一个方向禁用（`disabled:cursor-default` + 降透明，不隐藏，控件不换位）。箭头按用户看到的列表方向移动——卡片是「最新在上、队首在下」，所以上移 = 更晚发送、下移 = 更早发送（`moveQueued` 里 `up` 即数组后移一位；越界与未知 id 为 no-op），行首编号随重排实时重算。回归：`message-queue.test.tsx`、`queue-drain.test.ts`。
 - 可交互元素至少实现：默认 / hover / `focus-visible`（`ring-border-focus-ring`）/ active / disabled。按钮类控件的焦点环只走 `focus-visible`（不打扰鼠标用户）；输入类控件可以用 `focus:border-border-focus-ring` 表示聚焦，因为文本输入聚焦本身就是用户意图。三个搜索面板（⌘K 命令 / ⌘L 会话 / ⌘P 文件）的输入框例外：无边框，聚焦只靠光标与键盘高亮行，`.palette-search-field`（`globals.css`）负责压掉平台默认焦点框——Windows WebView2 会在 `outline-none` 之外再画一圈，macOS WKWebView 不画。
 - **渠道选择后保留当前引擎面板**：`engine-model-panel.tsx` 的 `ChannelPicker` 在选项卸载前将焦点交回同一面板的渠道按钮（`preventScroll: true`），桌面浮层与移动端弹窗共用。不能让选项卸载后的焦点恢复落到首个引擎行，触发 `onFocus` 把 Codex 面板切成 Claude Code；正常的引擎行点击、键盘导航与悬停切换保持不变。
+- **用量与消息记录按本轮实际模型归属**：`src/features/chat/store/engine-events.ts` 的 `stampedModel` 优先使用发送时初始化、由引擎上报更新的 `activeModel`；Claude 的 `haiku` / `sonnet` 等选择器别名不能压过已解析的自定义模型名。`sessions.ts` 的会话列表刷新不覆盖运行中已知的模型，标签页选择仍保留供下次发送。用量页按台账记录的模型名聚合，不按当前渠道映射猜测回填旧台账。回归：`usage-accounting.test.ts`、`session-model-memory.test.ts`。
 - disabled 必须改变光标语义（`disabled:cursor-not-allowed` 或 `disabled:cursor-default`）并降低强调（`opacity-50`~`60` 或语义 disabled token），不能只是点不动。
 - **异步动作进行中不可重入**：进行中禁用按钮（或首行拦截 `if (running) return`），避免重复请求。
 - **反馈不改变布局**：图标在默认态与反馈态之间切换时，外层容器尺寸固定（`ActionFeedbackIcon` 用 `iconClassName` 同时约束容器和图标），按钮不能因为换图标而抖动。
@@ -83,6 +85,7 @@
 - **同一状态只表达一次**：列表行里「已安装 / 可更新」只给一个信号——市场表的右侧按钮就是该行的状态（`安装` → `更新至 vX` → `已安装`），行内不再重复挂徽标；安装中按钮原地换成进度（`plugins.installingPct`）且保持占位不變（`PluginMarketRow.tsx`）。
 - **表格化列表**：插件市场用语义 `<table>` + `table-fixed`，列头是唯一的字段说明（名称 / 开发者 / 安装量 / 版本 / 操作）；整列无数据时整列不渲染（`PluginMarketView` 的 `showDownloads`），不用一列「—」占位。开发者列的头像是该账号的真实 GitHub 头像（`githubAvatarUrl`），加载中或取不到时回落到同一配色的首字母瓷砖，不出现破图。
 - **官方身份用紫色品牌徽标，工具栏下拉同时承担人群范围**：市场表开发者列在 `githubLoginFor` 解析出的账号等于官方账号时（`isOfficialPlugin`，账号 `zhukunpenglinyutong`，author 或 repo owner，大小写不敏感），整格只渲染紫色「CCGUI官方插件」徽标（`status-purple-background` / `status-purple-text`；紫色专属官方，不与中性类型徽标、lime「已安装」混用）——官方插件的账号是隐含信息，不再重复头像与（被截断的）用户名；详情页右栏 `AuthorChip` 同一条判定，徽标整块是按钮（`title` 报出目标主页），点击打开该官方账号主页，第三方插件才展示可点的头像+名称。工具栏下拉（`sortLabel`）语义混合：`综合排序` / `下载量` 显示全部、只是排序不同；`CCGUI官方插件` / `社区插件` 只保留该类并按下载量排序（`sortPlugins` 内 `pluginMatchesAudience`）。空状态的「清除筛选」要把下拉一并复位回 `综合排序`。
+- **「已安装」的筛选按记录字段判定，时间只说安装时间**：页头「已安装」标题右侧的下拉（`installed-filter.ts` 的 `filterInstalledPlugins`）默认「全部」，其余三项是「最近安装」（`installedAt` 落在 3 天窗口内，恰好满 3 天仍算，按安装时间倒序——四项里只有它重排，其余保持后端 id 序）、「市场安装」（记录 `source === "marketplace"`）、「本地安装」（`source === "local"`）。`installedAt` 是 backend 的 Unix 秒（`state.rs` 的 `now_secs`），不是毫秒；重装 / 更新保留首次安装时间（`fs.rs`），所以一次更新不会把旧插件顶进「最近安装」，时间戳为 0 的记录不算。搜索框与下拉同时生效，筛到空且确有筛选条件时给「清除筛选」，把两者一起复位。回归：`installed-filter.test.ts`、`PluginHub.test.tsx`。
 - **开发者只在能落到真实账号时可点**：插件详情页右栏的「开发者」用 `githubLoginFor({ author, repo })` 判定身份——索引 `author` 是 GitHub 账号（或回落到 repo owner）时，整块头像+名称是可点按钮，点击走 `openExternal` 打开 `https://github.com/<login>`，并把目标主页写进 `title`；官方徽标同理指向 `OFFICIAL_PLUGIN_LOGIN`；解析不出账号时保持纯文本，不猜主页地址（`PluginDetailPage.tsx` 的 `AuthorChip`）。
 - **带背景的块在 flex 列里必须自适应宽度**：右信息栏 `RailRow` 是 `flex flex-col`，默认 `align-items: stretch` 会把任何块拉伸到整栏宽——带背景的徽标不加 `w-fit` 就变成整行色块。所以 `OFFICIAL_BADGE` 带 `w-fit`，可点的头像+名称块用 `flex w-fit max-w-full`。长文本靠内层 `truncate` 收窄，不靠父级的拉伸。
 - **时间只说数据源里有的**：插件详情页右栏的「最近更新时间」只取索引 `plugins/<id>.json` 的 `updatedAt`（上游 Release 发布时间，`indexUpdatedAt` 解析后按当前语言格式化）；条目没有该字段就不渲染这一行，不用本机安装时间顶替，也不用「—」占位。
@@ -126,6 +129,8 @@
 - **界面缩放与字体设置一处存储、多处入口**：设置 → 通用 → 外观的「界面缩放」与状态栏 ± 按钮、缩放快捷键（⌘= / ⌘- / ⌘0，快捷键页可改）读写同一份 localStorage 百分比（`src/lib/zoom.ts`，50–200、步进 10），经 `ccgui:zoom-change` 事件互相同步，任一入口改动其余立刻跟上；应用走 Tauri 原生 webview zoom，重启由状态栏启动时重放。「界面字体 / 代码字体」（`src/features/settings/font.ts`）持久化在 AppSettings：`fontFamily` / `codeFontFamily` 存模式（空 = 「系统默认」，含旧 `system` 值，即内置 Inter / JetBrains Mono 加系统回退；`custom` = 上传的字体文件），`fontFile` / `codeFontFile` 存该文件绝对路径；应用方式是覆盖根元素 `--font-inter` / `--font-mono-source` 变量（聊天代码块与内置终端随 `--font-mono-source`，终端经 `ccgui:font-change` 事件热更 `term.options.fontFamily` 并重新 fit），bootstrap 首帧前从 localStorage 镜像预应用避免换字闪烁。自定义模式 = 下拉（只有「系统默认 / 自定义」两项）选「自定义」后右侧出现文件选择按钮，点击唤起原生字体文件对话框（TTF/OTF/TTC/WOFF/WOFF2），选中的文件经 Rust `read_font_file` 读取（校验字体魔数与 64 MB 上限，base64 回传）后用 FontFace API 注册为固定字节性家族名（`CCGUI Custom UI/Code Font`，重选替换旧 face），加载完成再触发 `ccgui:font-change` 让终端按真实字体重新量度；读取失败（不存在 / 过大 / 非字体）显示本地化错误并保留原选择，不落半成品设置。路径持久化：切回「系统默认」不清除已上传文件，再次选「自定义」直接重新应用（无需重选）；文件被移走/删除则静默回退到字体栈里的后备字体，设置不丢。旧 `system` 值与文件选择器之前的已安装字体名统一归并到「系统默认」（模式归一化，根变量随之移除），不再按字体名渲染。Web 访问模式不提供自定义（无原生对话框，且 web 桥不暴露任意文件读取），文件选择器与「自定义」选项只在桌面端渲染。宿主字体栈（`--font-sans` / `--font-mono` / `--default-font-family` / `--default-mono-font-family`）在 `theme.css` 的 `:root` 里额外以**无层**声明重推一次：插件 bundle 注入在 `@layer ccgui-plugins`（层序在 `theme` 之后），自带 Tailwind 构建的插件会输出 `--font-sans: var(--font-sans-host), …`，而它自己又声明 `--font-sans-host: var(--font-sans, …)`，两者成环使计算值为 guaranteed-invalid，preflight 回退到 `-apple-system`，界面/代码字体设置静默失效（kimi-lb 实测）；无层声明胜过所有 @layer，插件不能再改写宿主字体栈（`@theme` 里的同名定义仍保留，供实用类生成）。回归：`font-settings.test.tsx`、`builtin-search.test.tsx` 行索引用例、`plugin-ui-tokens.test.ts` 无层重推守卫、Rust `fonts::tests`。
 
 - **文件 Markdown 预览用 Streamdown 渲染**：`MarkdownPreview.tsx` 用 Vercel Streamdown（`mode="static"` + `code`/`math`/`mermaid`/`cjk` 插件），不再是裸 react-markdown 加手写标题样式（旧预览的 GFM 表格渲染成无边框纯文本）。它的 shadcn token（`bg-background`、`text-muted-foreground`、`border-border` 等）在 `src/styles/globals.css` 桥接到语义 token（`:root` 映射 + `@theme inline` 导出、`@source` 扫描 dist），暗色随 `.dark` 翻转，不另写 `dark:`。表格/代码块/图表的复制、下载、全屏按钮文案走 `files.markdown.*` i18n；外链一律 `openExternal` 交系统浏览器（内置 link-safety 弹层关闭，避免双重确认）；本地相对图片仍解析到 Markdown 文件旁的真实路径（`resolveMarkdownImageSrc`）。Mermaid 图滚入视口才渲染（IntersectionObserver 懒渲染），离屏留白是设计行为；编辑预览用 deferred 草稿整篇重解析，不逐键击卡顿。回归：`tests/browser/markdown-preview.html`。
+
+- **内网访问自启、访问 IP 切换与端口/Token配置**：设置「远程访问 / 内网访问」（`WebAccessSection.tsx`）提供「随应用自动开启」滑动开关（`Switch`），开启时客户端启动即自动运行内网 Web 服务（后端持久化于 `AppSettings.web_access_auto_start`，前端启动时带兜底探测与自启保障）。运行态下提供「访问 IP / 网卡」下拉框（`Select`），通过平台原生接口（Windows `GetAdaptersAddresses` / Unix `getifaddrs`）动态枚举本机网络接口 IPv4 列表，优先置顶 Tailscale 虚拟网卡与 CGNAT IP（100.64.0.0/10），并列出物理网卡及 Localhost 回环地址；切换 IP 联动实时更新访问地址、复制内容与二维码，并在本地持久化所选偏好（`WEB_ACCESS_SELECTED_IP_KEY`）。支持自定义监听端口（`web_access_port`，留空为自动分配随机端口）与持久化鉴权 Token（`web_access_token`，支持一键「重新生成」）；服务运行中修改配置在卡片内展示重启提示与快捷「立即重启服务」动作，绑定失败时在界面显式展示端口冲突原因。回归：`WebAccessSection.test.tsx`、`web::tests::*`。
 
 ## 4. 动作反馈
 
@@ -189,6 +194,7 @@ const feedback = useRunningFeedback(store.loading);
 - 用 `src/hooks/use-copied.ts` 的 `useCopied(resetMs = COPY_FEEDBACK_MS)`，成功后图标换成 `Check`，**1500ms** 后复位。性能诊断需要显式处理复制失败，使用同一 `COPY_FEEDBACK_MS` 常量，成功反馈与卸载清理语义保持一致。
 - 与刷新反馈的差异：复制没有别的成功信号，所以**可访问名一起改成"已复制"**（`aria-label` / `title`），刷新反馈则不改名。这是刻意的差别，不要强行统一。
 - 复制按钮旁边有明文内容时（如密钥框），保留原布局尺寸与分隔符，只换图标。
+- **非安全环境（局域网 HTTP）安全降级**：通过 `src/lib/clipboard.ts` 的 `copyText()` 或 `useCopied()` 复制，当 `navigator.clipboard` 因非安全上下文（如 `http://<ip>:<port>` 局域网 Web 桥）为 `undefined` 或调用失败时，自动降级到 `document.execCommand('copy')` 并安装全局 polyfill，避免抛出 `TypeError: Cannot read properties of undefined (reading 'writeText')` 导致界面崩溃。
 
 ### 4.3 桌面宠物（pet overlay）
 
@@ -240,6 +246,8 @@ const feedback = useRunningFeedback(store.loading);
 | 报错态「刷新」 | `src/features/files/FileTreeBody.tsx`、`src/features/files/EditorPane.tsx` | **不加反馈** | 纯文本恢复入口，见 §8 |
 | Worktree 状态采集 | `src/components/application/ai-chat/repo-tree.tsx`（`WorktreeGroup`） | **不加反馈** | 展开「WORKTREES」分组时后台刷一次 git status（复用 git store 30s TTL）与 `git_worktree_list`（locked/prunable），没有用户发起的「刷新」按钮；徽标随状态自然更新 |
 | 更换密钥 | `src/features/settings/WebAuthCard.tsx` | **不加反馈** | 语义是"轮换"不是"刷新" |
+| Git 任务管理「刷新」 | `ccgui-plugin/git-tasks/main.js` | `useRunningFeedback` 等价实现（0.6s 转圈 → 900ms 对号，失败复位） | 独立 ESM 插件（`exec:gh` / `exec:git`），不导入宿主 hook；重读当前预设下的议题 / PR 与预设计数。缺省不接入新的宿主依赖 |
+| Git 任务管理「重新读取工作区与仓库」 | 同上 | **不加反馈** | 弹层内的菜单项，点击即关闭入口（同「重新加载」成功后按钮消失一类）；加载态由选择器自身的分组转圈与计数表达。重读 `ctx.workspaces.list` + git remote 解析 + `gh repo list` |
 | 接力引擎列表 | `ccgui-plugin/ccgui-plugin-plan-execute-relay/main.js` | 异步动作期间禁用，失败行内告警 | 独立 ESM 插件的文本动作；不导入宿主私有反馈 hook。刷新仅重读可用引擎、渠道名和模型，不触发模型请求 |
 
 注：Worktree **创建进度行不登记**在本清单——它不是「重新读取」入口，而是一次性任务的状态表达（进行中 → 成功/失败），用 §5 的进度语言（`Loader2` + 阶段文案），不存在「再刷一次」的语义；其失败行的「重试」是重新执行创建动作，同样不是刷新。
@@ -258,6 +266,15 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.75 | 2026-10-05 | 插件中心「已安装」页头新增来源筛选下拉（全部 / 最近安装（3 天内，按安装时间倒序）/ 市场安装 / 本地安装），按安装记录的 `source` 与 Unix 秒 `installedAt` 判定，重装 / 更新不刷新首次安装时间；筛到空可一键清除筛选；§3 补充规则 |
+| v0.74 | 2026-10-05 | git-tasks 插件的仓库来源改为侧栏工作区（新增 SDK `ctx.workspaces.list()`，0.3.16）：选择器按「我的工作区」分组（工作区名 + 解析出的 owner/repo，副标题弱化），worktree 子行去重、非 github.com 远端计入「已忽略」，完整 GitHub 仓库列表折叠为第二组按需加载；浮层改为跟随锚点重定位、滚动不再关闭（弹层内滚动不重定位）；工具条控件对齐宿主尺度（32px / xs 26px）并补齐 `focus-visible` / `active` / `prefers-reduced-motion` 与图标按钮 `aria-label`；刷新接入 §4.1 转圈→对号；§7 登记两个入口 |
+| v0.73 | 2026-10-05 | 复制到剪贴板支持非安全上下文（局域网 HTTP）降级：提供 copyText 与 polyfill，自动回退到 execCommand，避免 navigator.clipboard 为 undefined 导致应用崩溃；WebAuthCard 补齐 Copy → Check 反馈；§4.2 补充规则 |
+| v0.72 | 2026-10-05 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环；仅凭 100.64.0.0/10 网段命中但未匹配 Tailscale 网卡名时标为 CGNAT）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（留空或 0 为自动分配随机端口，/重置/占用友好提示）与持久化 Token 配置（自填 Token 少于 16 位拒绝保存并提示，可重新生成，运行中修改提示一键重启）；§3 补充规则 |
+| v0.71 | 2026-10-05 | 原生 `title` 全局接管为主题化气泡（`NativeTitleTooltip`）：500ms 延迟、150ms 进入过渡、`z-[130]`，覆盖 body portal 弹层，`aria-description` 兜底读屏；§2.3 补充规则 |
+| v0.70 | 2026-10-05 | Git 多选提交语义对齐 IntelliJ 直觉并防止静默改动暂存区：勾选的文件按「整个文件」提交——同一文件同时有已暂存与未暂存改动时，提交前自动把工作区剩余改动一并暂存，不再只提交已暂存的那一半；当提交会把「已暂存但未勾选」的文件移出暂存区时，先弹确认框说明数量（改动保留在工作区，不丢失），确认后才执行，取消则完全不触碰暂存区 |
+| v0.69 | 2026-10-05 | Git 变更列表对齐 IntelliJ IDEA 状态颜色与文件类型图标：文件名与状态徽标按 Git 状态赋予不同语义颜色（变更/修改 M 为天蓝色 `#0088D2` / `#589DF6`、新增 A 为森林绿 `#208A3C` / `#59A869`、删除 D 为中性灰带删除线 `line-through`、未暂存/未跟踪 ? 为砖红色 `#B00020` / `#E05555`、重命名 R 为青蓝色）；每行文件展示对应的丰富语言/格式图标（涵盖 Java、Kotlin、TypeScript、Python、Rust、Go、C/C++、SQL、Docker 等）；目录节点采用暖黄色文件夹图标并在展开/收起时切换形态 |
+| v0.68 | 2026-10-05 | Git 变更面板（ChangesPanel）新增树状结构与多选提交：页头支持一键在「树状视图」与「列表视图」之间切换（`FolderTree` / `List` 图标按钮，持久化记忆偏好）；树状视图按路径构建目录层级并自动合并单子目录（compact folders），目录节点支持展开/收起、变更计数与整目录暂存/取消暂存/撤销；全部分组（已暂存/未暂存/未跟踪）与每个文件/目录新增 Checkbox 勾选框（支持全选/半选/取消），底栏提交按钮显示「提交 (N 项)」并在提交时自动暂存所选变更，实现即勾即提 |
+| v0.67 | 2026-10-01 | 用量与消息标记优先采用本轮实际模型，修复 Claude 自定义模型被统计成 haiku 等别名；会话刷新保留运行中模型，选择器与下次发送规则不变；§3 补充模型归属规则 |
 | v0.66 | 2026-09-30 | 智能体记忆补齐两个开关：「写入需要审批」把模型 / 复盘写入转成待审批队列（面板逐条或全部批准 / 驳回，replace/remove 展示前后对比，批准时才过容量闸，暂存后原文已变则拒绝执行；面板手动写入不审批）；「会话结束后台复盘」每 N 轮 + 离开会话触发，用该引擎的 API 渠道跑一次整理（无渠道 / 官方登录 / 忙碌明确跳过并就地说明），结果逐条走同一套写入闸；§3 更新记忆规则 |
 | v0.65 | 2026-09-30 | 智能体「记忆」上线：设置 → 智能体 → 记忆页签从概念图换成真面板（MEMORY / USER 两个账本、用量条、手动增删改、导出 / 清空），写入与容量规则后端单点（安全扫描 + 超限拒绝不截断），`memory` MCP 工具按引擎挂载（Claude Code / Codex / omp），USER/MEMORY 注入下次会话、引擎不支持时不写「记忆使用说明」；审批与后台复盘仍标「即将支持」；§3 补两条规则 |
 | v0.64 | 2026-09-30 | 多会话运行状态点改为静态阴影 + 缩放/透明度呼吸，保留 0.92s 节奏与重试/减少动态效果的静态反馈；增加真实侧栏与页签的并发动画回归 |

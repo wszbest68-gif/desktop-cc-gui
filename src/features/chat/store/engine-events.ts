@@ -7,7 +7,7 @@ import {
   applyPlanSettled,
 } from "./plan-review";
 import { errorText } from "@/lib/errors";
-import { dedupeTabs, persistTabs, sessionKey } from "./persistence";
+import { pendingWorkspaceOfKey, dedupeTabs, persistTabs, sessionKey } from "./persistence";
 import {
   EMPTY_SESSION,
   appendToolMessages,
@@ -132,22 +132,21 @@ export function upsertSessionMetaInto(
   });
 }
 
-/** Effective model for event-stamped rows: the session's activeModel wins,
- * followed by the owning tab's per-tab override, then the session's own
- * history, then the engine default — the same resolveSessionModel the send
- * path uses, so a row can never claim a model the turn did not run. */
+/** Rows and the ledger describe this turn, not the next picker selection.
+ * activeModel is seeded on send and updated by engine reports; it may be a
+ * concrete custom model while the tab deliberately keeps a family alias. */
 function stampedModel(
   deps: EngineEventDeps,
   engine: string,
   key: string,
 ): string | null {
   const s = deps.get();
+  const session = s.bySession[key];
+  if (session?.activeModel) return session.activeModel;
   const tab = s.openTabs.find(
     (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
   );
-  return (
-    resolveSessionModel(tab, s.bySession[key], s.models[engine]) || null
-  );
+  return resolveSessionModel(tab, session, s.models[engine]) || null;
 }
 
 /** Effective reasoning effort for event-stamped rows. Native-session state
@@ -362,8 +361,16 @@ function onSession(
   // otherwise fall back to the active tab's workspace.
   const tab =
     owner ?? (pendingCandidates.length === 1 ? pendingCandidates[0] : undefined);
+  // 插件轮次（ctx.sessions.startRun）不占标签页：工作区要从轮次路由键
+  // （`new:<engine>:<workspacePath>`）取。回落成「当前激活工作区」会让新行
+  // 先挂在用户正看着的仓库下（点同步才归位），还可能把前台的待发标签页
+  // 认领成这个会话。
+  const routedWorkspace = tab ? "" : pendingWorkspaceOfKey(event.engine, key);
   const workspacePath =
-    tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
+    tab?.workspacePath ||
+    routedWorkspace ||
+    deps.get().active?.workspacePath ||
+    "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
   // The event can resolve straight to the native key when it beat the send
   // response (the run had no routing entry yet). The turn rows and streaming
