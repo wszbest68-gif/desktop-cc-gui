@@ -825,6 +825,7 @@ mod tests {
             registry: Arc::clone(&registry),
             engine_id: "opencode".to_string(),
             run_id: "oc-test-run".to_string(),
+            db: None,
         };
         // The virtual registry entry the host path creates at send time.
         registry.insert(
@@ -837,6 +838,7 @@ mod tests {
                 reader_abort: Arc::new(std::sync::OnceLock::new()),
                 stdin: None,
                 questions: Arc::new(StdMutex::new(HashMap::new())),
+                plans: Arc::new(StdMutex::new(HashMap::new())),
             },
         );
         let req = SendRequest {
@@ -851,6 +853,7 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         };
         let turn = tokio::spawn(run_server_turn_with_probe_port(

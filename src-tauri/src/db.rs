@@ -29,6 +29,10 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // The memory MCP child (a separate process the CLI spawns) writes
+        // through its own connection while the app holds one: a busy writer
+        // must wait for the short write lock, not fail the tool call.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // ON DELETE CASCADE keeps session_messages/messages_fts and
         // fts_state in step with every sessions-row delete path (session
         // delete, stale pruning, workspace removal) without each site
@@ -671,6 +675,67 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(engine, session_id)
                 REFERENCES sessions(engine, session_id) ON DELETE CASCADE
         );
+        -- 计划预览与人工审批的审批事实源(engine/plan_review.rs)。独立于
+        -- session_messages 搜索索引,不声明 FK:sessions 行由扫描器从
+        -- transcript 建立,可能晚于计划记录到达,删除由 sessions 的清理
+        -- 路径显式级联(delete_reviews_for_session/_workspace)。
+        CREATE TABLE IF NOT EXISTS plan_reviews(
+            plan_id TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            run_id TEXT,
+            revision INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 0,
+            review_kind TEXT NOT NULL,
+            native_plan_id TEXT,
+            exec_permission TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            execution TEXT NOT NULL DEFAULT 'not_started',
+            decision TEXT,
+            decision_intent_at INTEGER,
+            applied_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            superseded_by INTEGER,
+            PRIMARY KEY(plan_id, revision)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plan_reviews_session
+            ON plan_reviews(engine, session_id);
+        -- 持久记忆条目(memory.rs):每个 Bot 一份 MEMORY(target='memory',
+        -- bot_id=Bot id),全局共用一份 USER(target='user', bot_id='')。
+        -- 上限是写入时的闸,不是存储的约束:超限的写入被拒绝而不是截断。
+        CREATE TABLE IF NOT EXISTS memory_entries(
+            id TEXT PRIMARY KEY,
+            target TEXT NOT NULL,
+            bot_id TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'user',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_scope
+            ON memory_entries(target, bot_id);
+        -- 待审批写入(memory/pending.rs):开启「写入需要审批」后,模型/复盘的
+        -- 写入先落在这里,用户批准才执行。target_snapshot 是暂存时目标条目的
+        -- 原文,审批时原文已变就拒绝执行(而不是覆盖用户的编辑)。
+        CREATE TABLE IF NOT EXISTS pending_memory_writes(
+            id TEXT PRIMARY KEY,
+            target TEXT NOT NULL,
+            bot_id TEXT NOT NULL DEFAULT '',
+            op TEXT NOT NULL,
+            content TEXT,
+            old_text TEXT,
+            target_entry_id TEXT,
+            target_snapshot TEXT,
+            origin TEXT NOT NULL DEFAULT 'agent',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_memory_scope
+            ON pending_memory_writes(target, bot_id);
         ",
     )?;
     // NB: no `cache_version` meta row — it was written but never read; cache

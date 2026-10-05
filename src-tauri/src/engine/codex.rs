@@ -80,6 +80,37 @@ fn apply_computer_use(
     Ok(())
 }
 
+/// Mount the per-bot memory tool on this one launch. Same `-c` override
+/// mechanism as the computer-use driver above: no file is written, and the
+/// Bot id rides in argv so concurrent sessions cannot cross ledgers.
+fn apply_memory(cmd: &mut tokio::process::Command, req: &SendRequest) -> Result<(), String> {
+    let Some(bot_id) = req.memory_bot.as_deref() else {
+        return Ok(());
+    };
+    let spec = crate::memory::mcp::bound_spec(bot_id)?;
+    let name = spec.name;
+    let args = spec
+        .args
+        .iter()
+        .map(|arg| toml_string(arg))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut overrides = vec![
+        format!("mcp_servers.{name}.command={}", toml_string(&spec.command)),
+        format!("mcp_servers.{name}.args=[{args}]"),
+    ];
+    for (key, value) in &spec.env {
+        overrides.push(format!(
+            "mcp_servers.{name}.env.{key}={}",
+            toml_string(value)
+        ));
+    }
+    for value in overrides {
+        cmd.arg("-c").arg(value);
+    }
+    Ok(())
+}
+
 /// Process-scoped equivalents of the provider keys formerly written into
 /// config.toml/auth.json. Explicit model/effort picks still win.
 pub(super) fn apply_channel(
@@ -256,6 +287,7 @@ impl Engine for CodexEngine {
     fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = command_for_binary(bin);
         apply_computer_use(&mut cmd, req)?;
+        apply_memory(&mut cmd, req)?;
         cmd.arg("app-server");
         // Without this the model never asks: it emits a plain agent message
         // (plus a sleep item) instead of a client request.
@@ -295,22 +327,48 @@ impl Engine for CodexEngine {
     fn supports_computer_use(&self) -> bool {
         true
     }
+    fn supports_memory(&self) -> bool {
+        true
+    }
     fn supports_effort(&self) -> bool {
         true
     }
     fn supported_permissions(&self) -> &'static [&'static str] {
-        &["auto", "manual", "bypass"]
+        &["auto", "manual", "bypass", "plan"]
+    }
+
+    /// 人工计划审批走 next_turn 生命周期(turn/start collaborationMode.plan
+    /// → 完整 plan item → 批准后原子创建一次 default 执行 turn),由本机
+    /// app-server 传输兑现(见 codex_app.rs);exec/WSL fallback 没有这条
+    /// 协议,在 build_command 里继续受控拒绝。
+    fn plan_approval(&self) -> super::plan_review::PlanApproval {
+        super::plan_review::PlanApproval::Typed {
+            review_kind: super::plan_review::PlanReviewKind::NextTurn,
+            evidence: "0.154.0 experimental schema TurnStartParams.collaborationMode + item/completed plan item",
+            limitations: "全部相关字段 EXPERIMENTAL；审批点=客户端仲裁；跨重启恢复需重取 plan item 比对",
+        }
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         if super::codex_read_only::requested(req) {
             return Err("Codex read-only planning requires the local app-server; exec/WSL fallback is forbidden".into());
         }
+        // Human plan approval exists only on the app-server transport
+        // (collaborationMode turns); the exec/WSL fallback has no such
+        // protocol, so an explicit plan request fails closed here instead of
+        // silently degrading to an auto run.
+        if req.permission.as_deref() == Some("plan") {
+            return Err("Codex plan approval runs on the local app-server transport; the exec/WSL fallback cannot honor it".into());
+        }
         // This path only serves a remote (WSL) workspace, and the injected
         // driver is the local app's own binary: the distro cannot run it.
         // Refuse before spawning instead of mounting a server that dies.
         if req.computer_use == Some(true) {
             return Err("操作电脑不支持远程工作区(WSL):注入的是本机驱动".into());
+        }
+        // Same reason: the memory server is this app's own binary.
+        if req.memory_bot.is_some() {
+            return Err("记忆工具不支持远程工作区(WSL):注入的是本机程序".into());
         }
         let mut cmd = command_for_binary(bin);
         cmd.arg("exec");
@@ -612,6 +670,7 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         }
     }
@@ -692,6 +751,41 @@ mod tests {
         // Off by default: no driver on an ordinary turn.
         let off = CodexEngine.host_command(&base_req(), "fake-bin").unwrap();
         assert!(overrides(&off.command).get("mcp_servers").is_none());
+    }
+
+    /// Codex 的人工计划审批能力声明:类型化 next_turn,且 plan 重新出现在
+    /// 支持列表里(resolve_permission 不再静默回退 auto)。
+    #[test]
+    fn plan_approval_is_typed_next_turn_and_advertised() {
+        assert!(CodexEngine.supported_permissions().contains(&"plan"));
+        match CodexEngine.plan_approval() {
+            crate::engine::plan_review::PlanApproval::Typed {
+                review_kind,
+                evidence,
+                limitations,
+            } => {
+                assert_eq!(
+                    review_kind,
+                    crate::engine::plan_review::PlanReviewKind::NextTurn
+                );
+                assert!(evidence.contains("collaborationMode"), "{evidence}");
+                assert!(!limitations.is_empty());
+            }
+            other => panic!("codex must declare typed next_turn plan approval, got {other:?}"),
+        }
+    }
+
+    /// exec/WSL fallback 没有 collaborationMode 协议:显式 plan 请求必须
+    /// fail-closed,不能随 resolve_permission 静默降级为 workspace-write。
+    #[test]
+    fn exec_path_refuses_plan_permission() {
+        let mut req = base_req();
+        req.permission = Some("plan".into());
+        let error = match CodexEngine.build_command(&req, "fake-bin") {
+            Err(error) => error,
+            Ok(_) => panic!("the exec/WSL path must refuse an explicit plan request"),
+        };
+        assert!(error.contains("app-server"), "{error}");
     }
 
     #[test]

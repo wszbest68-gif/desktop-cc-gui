@@ -1,5 +1,11 @@
 import { ipc, type Message, type QuestionSpec, type SessionMeta } from "@/lib/ipc";
+import type { PlanReview, PlanReviewStatus } from "@/lib/ipc";
 import type { EngineEventPayload } from "@/lib/events";
+import {
+  applyPlanDraft,
+  applyPlanReview,
+  applyPlanSettled,
+} from "./plan-review";
 import { errorText } from "@/lib/errors";
 import { dedupeTabs, persistTabs, sessionKey } from "./persistence";
 import {
@@ -38,7 +44,7 @@ import {
 } from "./ask-loop";
 import { mergeUsage, parseUsage, reportedContextWindow, type ParsedUsage } from "../usage";
 import { usageTrackingEnabled } from "@/features/settings/usage-tracking";
-import { migrateSelectedAgent } from "@/features/agents/selected-agent";
+import { migrateSelectedBot } from "@/features/bots/selected-bot";
 
 /**
  * Engine-event handling: the main loop resolves each event's session key and
@@ -46,6 +52,17 @@ import { migrateSelectedAgent } from "@/features/agents/selected-agent";
  * ChatStore type (type-only import, so no runtime cycle with store.ts);
  * everything the handlers need arrives through EngineEventDeps.
  */
+
+/** Plan-review events ride the same run envelope, but the kind union in
+ *  src/lib/events.ts is transport-owned (integration lead edits it), so the
+ *  chat side widens the payload type locally. Unknown kinds are ignored. */
+export type ChatEngineEvent = Omit<EngineEventPayload, "kind"> & {
+  kind:
+    | EngineEventPayload["kind"]
+    | "plan_draft"
+    | "plan_review"
+    | "plan_review_settled";
+};
 
 export interface EngineEventDeps {
   set: (fn: (s: ChatStore) => Partial<ChatStore>) => void;
@@ -58,6 +75,10 @@ export interface EngineEventDeps {
   upsertSessionMeta: (meta: SessionMeta) => void;
   /** Re-fetch the latest token usage from session history for the given session key. */
   refreshSessionUsage?: (key: string) => Promise<void>;
+  /** After a turn settles: feeds the background memory review's turn counter
+   *  (features/bots/memory-review.ts). Optional so tests can drive the router
+   *  without the memory feature. */
+  turnSettled?: (key: string) => void;
 }
 
 /** Collapse whitespace and cap a prompt for use as a session title. */
@@ -144,7 +165,7 @@ function stampedEffort(
 }
 
 function onModel(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -180,7 +201,7 @@ function onModel(
 }
 
 function onEffort(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -204,7 +225,7 @@ function onEffort(
 const retryingKeys = new Set<string>();
 
 function onDelta(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -221,7 +242,7 @@ function onDelta(
 }
 
 function onThinking(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -238,7 +259,7 @@ function onThinking(
 }
 
 function onMessage(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -317,7 +338,7 @@ export function rememberProviderForRun(
 }
 
 function onSession(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -459,7 +480,7 @@ function onSession(
   });
   // The pinned agent followed the draft key; move it onto the native id so
   // the next send in this tab injects it again.
-  migrateSelectedAgent(workspacePath, nativeId);
+  migrateSelectedBot(workspacePath, nativeId);
   // Sidebar row + tab title pick the new session up immediately instead of
   // waiting for the post-turn rescan.
   const firstUser = (deps.get().bySession[newKey]?.messages ?? []).find(
@@ -520,7 +541,7 @@ export function settleOrphanedRuns(
 }
 
 function onUsage(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -569,7 +590,7 @@ function usageSnapshot(totals: ParsedUsage): Record<string, number> {
 /** Ledger one engine report (one request) as it arrives. */
 function recordUsageReport(
   deps: EngineEventDeps,
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   parsed: ParsedUsage,
 ) {
@@ -581,7 +602,7 @@ function recordUsageReport(
 /** Shared writer: one ledger row for the run's model and session. */
 function writeUsageRow(
   deps: EngineEventDeps,
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   parsed: ParsedUsage,
   reports: number,
@@ -608,7 +629,7 @@ function writeUsageRow(
 }
 
 function onError(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -749,7 +770,7 @@ export function patchQuestionBySeq(
  * final result's permission_denials; one card per denied path. The card is
  * the actionable surface: grant → next launch gets --add-dir. */
 function onPermissionDenied(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -823,7 +844,7 @@ function sendAskTerminator(loop: AskLoop, key: string, deps: EngineEventDeps) {
 }
 
 function onQuestion(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -931,8 +952,104 @@ function onQuestion(
   }
 }
 
+/** Fold unflushed stream chunks into settled rows, then run a plan-card
+ *  transform, so a plan card lands after the text streamed before it (the
+ *  same fold the question/grant cards do). */
+function updatePlanMessages(
+  deps: EngineEventDeps,
+  key: string,
+  event: ChatEngineEvent,
+  transform: (messages: Message[]) => Message[] | null,
+) {
+  const pending = drainPending(key);
+  deps.set((s) => {
+    const cur = s.bySession[key] ?? EMPTY_SESSION;
+    const base = pending
+      ? applyStreamParts(
+          cur.messages,
+          pending.parts,
+          pending.model ?? (deps.get().models[event.engine] || null),
+        )
+      : cur.messages;
+    const next = transform(settleLiveRows(base));
+    if (!next) return {};
+    return { bySession: { ...s.bySession, [key]: { ...cur, messages: next } } };
+  });
+}
+
+const PLAN_STATUSES: readonly PlanReviewStatus[] = [
+  "draft",
+  "awaiting_review",
+  "submitting",
+  "approved",
+  "changes_requested",
+  "deferred",
+  "cancelled",
+  "expired",
+  "superseded",
+];
+
+function onPlanDraft(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+  const data = (event.data ?? {}) as {
+    planId?: unknown;
+    text?: unknown;
+    replace?: unknown;
+  };
+  const planId = typeof data.planId === "string" ? data.planId.trim() : "";
+  const text = typeof data.text === "string" ? data.text : "";
+  if (!planId) return;
+  updatePlanMessages(deps, key, event, (messages) =>
+    applyPlanDraft(messages, {
+      planId,
+      text,
+      replace: data.replace === true,
+      engine: event.engine,
+      sessionId: event.sessionId,
+      runId: event.runId,
+      ts: event.ts ?? Date.now(),
+    }),
+  );
+}
+
+function onPlanReview(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+  const record = event.data as PlanReview | null | undefined;
+  // Fail closed on a malformed record: a card without identity/revision
+  // could never be CAS-arbitrated, so it must not reach the timeline.
+  if (
+    !record ||
+    typeof record.planId !== "string" ||
+    !record.planId.trim() ||
+    typeof record.revision !== "number" ||
+    !PLAN_STATUSES.includes(record.status)
+  ) {
+    return;
+  }
+  updatePlanMessages(deps, key, event, (messages) =>
+    applyPlanReview(messages, record),
+  );
+}
+
+function onPlanReviewSettled(
+  event: ChatEngineEvent,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  const data = (event.data ?? {}) as {
+    planId?: unknown;
+    revision?: unknown;
+    status?: unknown;
+  };
+  const planId = typeof data.planId === "string" ? data.planId.trim() : "";
+  const revision = typeof data.revision === "number" ? data.revision : -1;
+  const status = data.status as PlanReviewStatus;
+  if (!planId || revision < 0 || !PLAN_STATUSES.includes(status)) return;
+  updatePlanMessages(deps, key, event, (messages) =>
+    applyPlanSettled(messages, planId, revision, status),
+  );
+}
+
 function onQuestionSettled(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -945,7 +1062,7 @@ function onQuestionSettled(
   if (askLoops.get(key)?.requestId === requestId) askLoops.delete(key);
 }
 
-function onWarn(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+function onWarn(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   // Non-terminal notice (e.g. an upstream 429 the CLI is retrying): show the
   // banner, but the turn is still alive — streaming state, unflushed chunks,
   // and run routing all stay untouched. Cleared by onDone when the turn
@@ -960,7 +1077,7 @@ function onWarn(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
  * backing off and will re-issue the request, so this is progress. An attempt
  * of 0 (or a retry-end event) clears it; so does the next content event.
  */
-function onRetry(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+function onRetry(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   const data = (event.data ?? {}) as {
     attempt?: unknown;
     max?: unknown;
@@ -1000,7 +1117,7 @@ function clearRetry(key: string, deps: EngineEventDeps) {
  *  automatic mid-turn summarization, surfaced as the tail indicator's label
  *  swap. `active: false` clears only an automatic flag — a manual compact
  *  turn owns its flag until the turn settles. */
-function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+function onCompaction(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   const data = (event.data ?? {}) as { active?: unknown };
   if (data.active === true) {
     if (deps.get().bySession[key]?.compaction) return;
@@ -1012,7 +1129,7 @@ function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventD
   }
 }
 
-function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   clearRetry(key, deps);
   askLoops.delete(key);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
@@ -1097,6 +1214,9 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   // Native file changed; refresh list cache in background.
   void ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
+  // 一轮对话落定（正常完成或被用户中断）时计数；是否到节奏、用哪个 Bot
+  // 复盘由记忆模块判断（features/bots/memory-review.ts）。
+  deps.turnSettled?.(key);
   // An interrupted turn settles here too: keep the queue parked — the user
   // stopped the session, the next message is theirs to send.
   if (!prev.interrupted) {
@@ -1120,7 +1240,7 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
  *  reports already have their rows. */
 function recordTurnUsage(
   deps: EngineEventDeps,
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   usage: unknown,
 ) {
@@ -1136,7 +1256,7 @@ function recordTurnUsage(
  *  Routes the run first so Stop and the orphan sweep reach it, then lifts the
  *  two flags the composer / sidebar / tab dots read. */
 function adoptObservedRun(
-  event: EngineEventPayload,
+  event: ChatEngineEvent,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1168,10 +1288,10 @@ const MAX_SETTLED_RUNS = 256;
 /** Resolve an event's session key (run routing, then session-id match) and
  * dispatch to the per-kind handler. */
 export function handleEngineEvents(
-  events: EngineEventPayload[],
+  events: ChatEngineEvent[],
   deps: EngineEventDeps,
 ) {
-  let toolBatch: { event: EngineEventPayload; key: string; tools: ToolMessageInput[] } | undefined;
+  let toolBatch: { event: ChatEngineEvent; key: string; tools: ToolMessageInput[] } | undefined;
   const flushTools = () => {
     if (!toolBatch) return;
     const { event, key, tools } = toolBatch;
@@ -1192,6 +1312,13 @@ export function handleEngineEvents(
       flushTools();
     }
     const settled = settledRuns.get(event.runId);
+    // Plans outlive their run's terminal event: expire_parked_plans settles
+    // parked approvals after done/error at teardown (either order for a
+    // kill), so plan events must reach the switch even then.
+    const isPlanEvent =
+      event.kind === "plan_draft" ||
+      event.kind === "plan_review" ||
+      event.kind === "plan_review_settled";
     // EOF stderr/failure can follow Done, and the turn's final usage report
     // can trail either terminal event. Keep those, but never adopt the run
     // again or drain its queue a second time.
@@ -1199,10 +1326,14 @@ export function handleEngineEvents(
       settled &&
       !(
         event.kind === "usage" ||
+        event.kind === "plan_review_settled" ||
         (settled === "done" &&
           (event.kind === "warn" ||
             event.kind === "error" ||
-            event.kind === "question_settled"))
+            event.kind === "question_settled" ||
+            // A next_turn review can arrive after its plan turn's done.
+            event.kind === "plan_draft" ||
+            event.kind === "plan_review"))
       )
     )
       continue;
@@ -1232,7 +1363,8 @@ export function handleEngineEvents(
       // is per computer-use send (messaging.ts); the call is idempotent.
       void ipc.computerUseSetActive?.(false)?.catch(() => {});
     }
-    if (state.bySession[key]?.settledRunIds?.includes(event.runId)) {
+    if (!isPlanEvent &&
+      state.bySession[key]?.settledRunIds?.includes(event.runId)) {
       // A usage report trailing the terminal event carries the turn's final
       // occupancy. Re-read it from the transcript instead of patching the
       // settled state — the file can lag the event, and refreshSessionUsage
@@ -1303,6 +1435,15 @@ export function handleEngineEvents(
         break;
       case "question_settled":
         onQuestionSettled(event, key, deps);
+        break;
+      case "plan_draft":
+        onPlanDraft(event, key, deps);
+        break;
+      case "plan_review":
+        onPlanReview(event, key, deps);
+        break;
+      case "plan_review_settled":
+        onPlanReviewSettled(event, key, deps);
         break;
       case "done":
         onDone(event, key, deps);

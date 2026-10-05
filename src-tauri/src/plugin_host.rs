@@ -769,9 +769,13 @@ mod tests {
                     enabled: true,
                     supports_images: true,
                     supports_computer_use: false,
+                    supports_memory: false,
                     supports_effort: true,
                     supports_tool_constraints: false,
                     permissions: vec!["default".to_string()],
+                    plan: crate::engine::plan_review::PlanApproval::Unavailable {
+                        reason: "test stub",
+                    },
                 },
                 sources: vec![model_source(
                     "codex:cli".to_string(),

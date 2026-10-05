@@ -1,6 +1,7 @@
 import { lazy, Suspense, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import Settings from "lucide-react/dist/esm/icons/settings";
+import PawPrint from "lucide-react/dist/esm/icons/paw-print";
 import Keyboard from "lucide-react/dist/esm/icons/keyboard";
 import Globe from "lucide-react/dist/esm/icons/globe";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
@@ -10,6 +11,7 @@ import Activity from "lucide-react/dist/esm/icons/activity";
 import FlaskConical from "lucide-react/dist/esm/icons/flask-conical";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import Bot from "lucide-react/dist/esm/icons/bot";
+import FileText from "lucide-react/dist/esm/icons/file-text";
 import Smartphone from "lucide-react/dist/esm/icons/smartphone";
 import ChartColumn from "lucide-react/dist/esm/icons/chart-column";
 import Sparkles from "lucide-react/dist/esm/icons/sparkles";
@@ -23,10 +25,12 @@ import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands"
 import { settingsRegistry } from "@ccgui/plugin-sdk";
 import { cx } from "@/utils/cx";
 import { GeneralSection } from "./GeneralSection";
+import { PetSection } from "./PetSection";
 import { ProxySection } from "./ProxySection";
 import { WorkspacesSection } from "./WorkspacesSection";
 import { ArchivedSessionsSection } from "./ArchivedSessionsSection";
-import { AgentsPromptsSection } from "./agents-prompts/AgentsPromptsSection";
+import { BotsPane } from "./agents-prompts/BotsPane";
+import { PromptsPane } from "./agents-prompts/PromptsPane";
 import { CliConfigSection } from "./CliConfigSection";
 import { AboutSection } from "./AboutSection";
 import { PerformanceDiagnosticsSection } from "./PerformanceDiagnostics";
@@ -36,6 +40,8 @@ import { WebAccessSection } from "./WebAccessSection";
 import { UsageSection } from "./UsageSection";
 import { ShortcutsSection } from "@/features/shortcuts/ShortcutsSection";
 import { ENGINE_IDS, type EngineId } from "./providers";
+import { builtinSearchEntries } from "./builtin-search";
+import { registerSettingsSearchEntries } from "./settings-search";
 
 /**
  * Builtin settings sections, registered through the same extension-point
@@ -70,13 +76,16 @@ settingsRegistry.register({
   order: 0,
   component: GeneralSection,
 });
+// 页面内部的搜索行索引（settings-search.ts）：跟页面一起注册。覆盖了哪些页
+// 在 builtin-search.ts 里一眼能看全（每页一段）。
+registerSettingsSearchEntries(builtinSearchEntries);
 settingsRegistry.register({
   id: "proxy",
   key: "proxy",
   label: () => i18n.t("settings.proxy"),
   icon: Globe,
   group: "system",
-  order: 4,
+  order: 5,
   component: ProxySection,
 });
 settingsRegistry.register({
@@ -98,13 +107,22 @@ settingsRegistry.register({
   component: ArchivedSessionsSection,
 });
 settingsRegistry.register({
-  id: "agentsPrompts",
-  key: "agentsPrompts",
-  label: () => i18n.t("settings.agentsPrompts"),
+  id: "agents",
+  key: "agents",
+  label: () => i18n.t("settings.agents"),
   icon: Bot,
   group: "system",
   order: 3,
-  component: AgentsPromptsSection,
+  component: BotsPane,
+});
+settingsRegistry.register({
+  id: "prompts",
+  key: "prompts",
+  label: () => i18n.t("settings.prompts"),
+  icon: FileText,
+  group: "system",
+  order: 4,
+  component: PromptsPane,
 });
 settingsRegistry.register({
   id: "webAccess",
@@ -203,6 +221,15 @@ settingsRegistry.register({
 //   order: 2,
 //   component: LazyComputerUseSection,
 // });
+settingsRegistry.register({
+  id: "pet",
+  key: "pet",
+  label: () => i18n.t("settings.pet"),
+  icon: PawPrint,
+  group: "misc",
+  order: 4,
+  component: PetSection,
+});
 settingsRegistry.register({
   id: "update",
   key: "update",

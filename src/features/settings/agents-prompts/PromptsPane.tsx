@@ -41,7 +41,8 @@ type ScopeFilter = "all" | PromptScope;
 const ICON_BUTTON =
   "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-foreground-icon-secondary transition-colors hover:bg-background-secondary-hover hover:text-foreground-icon-primary";
 
-/** Compact select trigger (h 32, radius/lg), matching GeneralSection rows. */
+/** Compact select trigger (h 32, radius/lg), matching the settings pages'
+ *  (外观 / 对话与输入) rows. */
 const SELECT_TRIGGER = "w-32";
 
 function PromptRow({
@@ -206,7 +207,7 @@ export function PromptsPane() {
 
       <div className="flex items-center justify-between gap-3">
         <SettingsSectionLabel>
-          {t("settings.agentPromptTabPrompts")}
+          {t("settings.prompts")}
           <span className="ml-2 text-body-2-regular font-normal text-text-tertiary">
             {t("settings.promptSectionDesc")}
           </span>
