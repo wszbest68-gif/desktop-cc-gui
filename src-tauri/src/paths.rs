@@ -16,6 +16,13 @@ fn read_portable_app_home() -> Option<PathBuf> {
     if path.is_relative() {
         return None;
     }
+    // It must also sit OUTSIDE the user's home directory: tauri.conf.json's
+    // assetProtocol scope statically denies only `$HOME/.ccgui-next`, so an
+    // in-home portable dir (e.g. ~/portable-ccgui/data) would let webview JS
+    // read provider API keys and session history through the asset: protocol.
+    if path.starts_with(home_dir()) {
+        return None;
+    }
     Some(path)
 }
 
