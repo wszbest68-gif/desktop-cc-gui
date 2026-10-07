@@ -1454,6 +1454,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_codex_channel_preserves_native_storage_settings() {
+        let provider = serde_json::json!({"settingsConfig": {
+            "config": "disable_response_storage = true\nmodel = \"channel-model\"\n"
+        }});
+        for native_value in [false, true] {
+            let base = format!("disable_response_storage = {native_value}\n");
+            let doc = render_codex(&base, &provider)
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            assert_eq!(doc["disable_response_storage"].as_bool(), Some(native_value));
+            assert_eq!(doc["model"].as_str(), Some("channel-model"));
+        }
+    }
+
+    #[test]
     fn kimi_writes_provider_alias_and_default() {
         let (dir, target) = fixture("kimi", "config.toml");
         std::fs::write(
