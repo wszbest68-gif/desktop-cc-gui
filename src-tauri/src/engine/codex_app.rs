@@ -1455,10 +1455,7 @@ async fn handshake_and_start(
         } else {
             THREAD_TIMEOUT
         };
-    let (method, mut params) = match req.session_id.as_deref() {
-        Some(thread_id) => ("thread/resume", json!({ "threadId": thread_id })),
-        None => ("thread/start", json!({})),
-    };
+    let (method, mut params) = thread_open_request(req.session_id.as_deref());
     params["cwd"] = json!(req.workspace.to_string_lossy());
     params["sandbox"] = json!(sandbox_for(req.permission.as_deref()));
     params["approvalPolicy"] = json!("never");
@@ -1598,6 +1595,18 @@ async fn handshake_and_start(
         .and_then(Value::as_str)
         .map(str::to_string);
     Ok(Some(TurnStarted { thread_id, turn_id }))
+}
+
+/// A resume reply is one NDJSON frame. Asking Codex to hydrate every prior
+/// turn can make that otherwise valid frame exceed the host's safety bound.
+fn thread_open_request(session_id: Option<&str>) -> (&'static str, Value) {
+    match session_id {
+        Some(thread_id) => (
+            "thread/resume",
+            json!({ "threadId": thread_id, "excludeTurns": true }),
+        ),
+        None => ("thread/start", json!({})),
+    }
 }
 
 /// Everything after the `turn/start` ack: stream the turn to its terminal
@@ -2352,6 +2361,18 @@ mod tests {
         // default here.
         assert_eq!(sandbox_for(Some("plan")), "workspace-write");
         assert_eq!(sandbox_for(None), "workspace-write");
+    }
+
+    #[test]
+    fn resumed_threads_skip_full_history_hydration() {
+        let (method, params) = thread_open_request(Some("thread-123"));
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], json!("thread-123"));
+        assert_eq!(params["excludeTurns"], json!(true));
+
+        let (method, params) = thread_open_request(None);
+        assert_eq!(method, "thread/start");
+        assert!(params.get("excludeTurns").is_none());
     }
 
     #[test]
