@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { ModelOption } from "@/components/application/ai-chat/cli-menu";
 import type { ChannelOption } from "@/components/application/ai-chat/engine-model-panel";
 import { ipc, type CliConfig, type EngineCatalog, type EngineInfo } from "@/lib/ipc";
+import { resolveModelIdInCatalog } from "@/lib/model-id";
 import {
   CLI_CONFIG_CHANGED_EVENT,
   isPseudoProvider,
@@ -54,17 +55,6 @@ function configuredModel(
 ): string {
   const raw = channelRaw(engineId, cliConfig, channelId);
   return raw ? providerModel(engineId as EngineId, raw).trim() : "";
-}
-
-/** Catalog ids can be `provider/model` composites (DSH's session/modelCatalog
- *  flattens to them) while the channel's configured model is stored bare —
- *  the same model then listed twice: once raw, once catalogued. Resolve a
- *  bare id to its unique composite catalog entry so the two collapse into
- *  one row. */
-function resolveCompositeId(id: string, catalogIds: string[]): string {
-  if (!id || id.includes("/")) return id;
-  const matches = catalogIds.filter((cid) => cid.endsWith(`/${id}`));
-  return matches.length === 1 ? matches[0] : id;
 }
 
 export function useEngineModels(
@@ -216,8 +206,14 @@ export function useEngineModels(
     const result: Record<string, ModelOption[]> = {};
     for (const engine of engines) {
       const catalog = catalogs[engine.id]?.models ?? [];
-      const catalogIds = catalog.map((m) => m.id);
-      const configured = resolveCompositeId(
+      // Keep the first row's metadata in every workspace context.
+      const catalogById = new Map<string, (typeof catalog)[number]>();
+      for (const model of catalog) {
+        if (!catalogById.has(model.id)) catalogById.set(model.id, model);
+      }
+      const uniqueCatalog = [...catalogById.values()];
+      const catalogIds = [...catalogById.keys()];
+      const configured = resolveModelIdInCatalog(
         configuredModel(engine.id, cliConfig, providers[engine.id]),
         catalogIds,
       );
@@ -226,11 +222,11 @@ export function useEngineModels(
         channelRaw(engine.id, cliConfig, providers[engine.id]),
       );
       const providerModels = configured ? [configured] : [];
-      const current = resolveCompositeId(models[engine.id]?.trim() ?? "", catalogIds);
+      const current = resolveModelIdInCatalog(models[engine.id]?.trim() ?? "", catalogIds);
       // Remote workspace (WSL distro): local channel/custom models cannot
       // run there — the distro CLI's own list is the entire menu.
       if (catalogs[engine.id]?.remote) {
-        result[engine.id] = catalog.map((m) => ({
+        result[engine.id] = uniqueCatalog.map((m) => ({
           id: m.id,
           label: m.name || m.id,
           description: m.description ?? undefined,
@@ -244,14 +240,13 @@ export function useEngineModels(
       const known = [
         ...new Set([
           ...providerModels,
-          ...catalog.map((m) => m.id),
+          ...catalogIds,
           ...(customModels[engine.id] ?? []),
           ...(current ? [current] : []),
         ]),
       ];
-      const byId = new Map(catalog.map((m) => [m.id, m]));
       result[engine.id] = known.map((m) => {
-        const entry = byId.get(m);
+        const entry = catalogById.get(m);
         // The CLI's alias rows (Default/Opus/…) describe the CLI's OWN
         // settings — the official channel's. Under another channel the alias
         // runs that channel's mapped id (spawn injects its env), so the row
@@ -339,10 +334,16 @@ export function useEngineModels(
         continue;
       }
       const catalog = catalogs[engine.id];
+      // Resolve only for the validity check. Keep the persisted/fallback id in
+      // its original form because that is the id passed to the engine.
+      const resolvedStored = resolveModelIdInCatalog(
+        stored,
+        (catalog?.models ?? []).map((model) => model.id),
+      );
       if (
         catalog?.authoritative &&
         catalog.models.length > 0 &&
-        !knownIdsByEngine[engine.id]?.has(stored)
+        !knownIdsByEngine[engine.id]?.has(resolvedStored)
       ) {
         updates[engine.id] = fallback;
       }

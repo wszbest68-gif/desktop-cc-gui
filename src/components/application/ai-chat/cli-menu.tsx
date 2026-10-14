@@ -1,7 +1,8 @@
 import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier";
+import { resolveModelIdInCatalog } from "@/lib/model-id";
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
@@ -479,11 +480,21 @@ export function CliMenu({
   const { t } = useTranslation();
   const { isOpen, triggerRef, popoverRef, close, setOpen } = usePopoverState();
   const current = options.find((o) => o.id === value);
+  const normalizedModels = useMemo(() => {
+    const result = { ...models };
+    for (const [engine, selected] of Object.entries(models)) {
+      result[engine] = resolveModelIdInCatalog(
+        selected,
+        (modelsByEngine[engine] ?? []).map((model) => model.id),
+      );
+    }
+    return result;
+  }, [models, modelsByEngine]);
 
   // Trigger carries the whole selection at a glance:
   // "Claude Code / 默认 · 高" (CLI name / model / effort). The model part
   // only drops out when the engine has no model list at all.
-  const selectedModelId = models[value] ?? "";
+  const selectedModelId = normalizedModels[value] ?? "";
   const selectedModel = (modelsByEngine[value] ?? []).find((m) => m.id === selectedModelId);
   const engineName = CLI_DISPLAY_NAMES[value] ?? current?.label ?? value;
   const triggerEffort: EffortLevel = efforts[value] ?? "medium";
@@ -627,7 +638,7 @@ export function CliMenu({
             value={value}
             openEngine={openEngine}
             modelsByEngine={modelsByEngine}
-            models={models}
+            models={normalizedModels}
             efforts={efforts}
             query={query}
             onQueryChange={setQuery}
@@ -655,7 +666,7 @@ export function CliMenu({
     <EngineModelDialog
       option={dialogOption}
       modelsByEngine={modelsByEngine}
-      models={models}
+      models={normalizedModels}
       efforts={efforts}
       query={query}
       onQueryChange={setQuery}

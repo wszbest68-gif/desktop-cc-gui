@@ -188,9 +188,98 @@ describe("useEngineModels channel models", () => {
     expect(rows[0]?.label).toBe("DeepSeek-V4-Pro");
     expect(rows[0]?.description).toBe("Stronger agentic coding");
   });
+
+  it("目录同时有裸 ID 和复合 ID 时保留精确裸 ID", async () => {
+    vi.mocked(ipc.getCliConfig).mockResolvedValue({
+      ...cliConfigWith(EMPTY_SECTION),
+      dsh: {
+        current: "ch1",
+        providers: { ch1: { name: "Exact", model: "gpt-5" } },
+      },
+    });
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [
+        { id: "gpt-5", name: "Bare GPT-5" },
+        { id: "openai/gpt-5", name: "Composite GPT-5" },
+      ],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+
+    await show([engineInfo("dsh", true)]);
+    expect(latest.modelsByEngine.dsh?.map((model) => model.id)).toEqual([
+      "gpt-5",
+      "openai/gpt-5",
+    ]);
+  });
+
+  it("重复的同一复合目录 ID 仍能合并裸配置项", async () => {
+    vi.mocked(ipc.getCliConfig).mockResolvedValue({
+      ...cliConfigWith(EMPTY_SECTION),
+      dsh: {
+        current: "ch1",
+        providers: { ch1: { name: "Duplicate", model: "gpt-5" } },
+      },
+    });
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [
+        { id: "openai/gpt-5", name: "First GPT-5" },
+        { id: "openai/gpt-5", name: "Second GPT-5" },
+      ],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+
+    await show([engineInfo("dsh", true)]);
+    expect(latest.modelsByEngine.dsh?.map((model) => model.id)).toEqual([
+      "openai/gpt-5",
+    ]);
+    expect(latest.modelsByEngine.dsh?.[0]?.label).toBe("First GPT-5");
+  });
+
+  it("远程目录重复同一复合 ID 时只显示一行", async () => {
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [
+        { id: "openai/gpt-5", name: "First GPT-5" },
+        { id: "openai/gpt-5", name: "Second GPT-5" },
+      ],
+      authoritative: true,
+      remote: true,
+    } as unknown as EngineCatalog);
+
+    await show([engineInfo("dsh", true)], WS_REMOTE);
+    expect(latest.modelsByEngine.dsh?.map((model) => model.id)).toEqual([
+      "openai/gpt-5",
+    ]);
+    expect(latest.modelsByEngine.dsh?.[0]?.label).toBe("First GPT-5");
+  });
 });
 
 describe("useEngineModels pin effect", () => {
+  it("已保存裸 ID 唯一对应目录复合 ID 时不重置用户选择", async () => {
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [
+        { id: "deepseek-official/deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
+        { id: "deepseek-official/deepseek-flash", name: "DeepSeek-Flash" },
+      ],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+    const pinModels = vi.fn(async () => {});
+    await render({ models: { omp: "deepseek-flash" }, pinModels });
+    expect(pinModels).not.toHaveBeenCalled();
+  });
+
+  it("已保存裸 ID 对应多个提供商时仍按过期选择处理", async () => {
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [
+        { id: "provider-a/deepseek-flash", name: "A" },
+        { id: "provider-b/deepseek-flash", name: "B" },
+      ],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+    const pinModels = vi.fn(async () => {});
+    await render({ models: { omp: "deepseek-flash" }, pinModels });
+    expect(pinModels).toHaveBeenCalledWith({ omp: "provider-a/deepseek-flash" });
+  });
+
   it("远端(remote)catalog 只做展示:永不触发 pin,不污染全局 models / persisted 默认", async () => {
     vi.mocked(ipc.listEngineModels).mockResolvedValue({
       models: [{ id: "remote-m1", name: "Remote M1" }],

@@ -2,7 +2,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@/lib/i18n";
-import { CliMenu } from "./cli-menu";
+import { CliMenu, type ModelOption } from "./cli-menu";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -44,6 +44,34 @@ function Harness({ initialEngine = "claude" }: { initialEngine?: string }) {
       onChannelChange={(engine, id) => {
         setSelectedChannels((channels) => ({ ...channels, [engine]: id }));
       }}
+      ompServiceTier={null}
+      onOmpServiceTierChange={async () => {}}
+      codexServiceTier={null}
+      onCodexServiceTierChange={async () => {}}
+    />
+  );
+}
+
+function BareModelHarness({
+  rows = [
+    { id: "deepseek-official/deepseek-v4-pro", label: "DeepSeek-V4-Pro" },
+    { id: "deepseek-official/deepseek-flash", label: "DeepSeek-Flash" },
+  ],
+  selectedId = "deepseek-v4-pro",
+}: {
+  rows?: ModelOption[];
+  selectedId?: string;
+}) {
+  return (
+    <CliMenu
+      options={[{ id: "dsh", label: "DeepSeek Harness", available: true }]}
+      value="dsh"
+      onChange={() => {}}
+      modelsByEngine={{ dsh: rows }}
+      models={{ dsh: selectedId }}
+      onModelChange={() => {}}
+      efforts={{}}
+      onEffortChange={() => {}}
       ompServiceTier={null}
       onOmpServiceTierChange={async () => {}}
       codexServiceTier={null}
@@ -213,5 +241,106 @@ describe("CliMenu flyout switching", () => {
 
     await click(engineRow("Claude")!);
     expect(flyoutTitle()).toBe("Claude Code 引擎");
+  });
+
+  it("归一化裸模型 ID 后仍显示当前目录项并标记选中", async () => {
+    await act(async () => {
+      root.render(<BareModelHarness />);
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label*="DeepSeek-V4-Pro"]',
+    );
+    expect(trigger).not.toBeNull();
+
+    await act(async () => {
+      trigger!.click();
+    });
+    const selected = document.querySelector<HTMLButtonElement>(
+      '[role="radio"][aria-checked="true"]',
+    );
+    expect(selected?.textContent).toContain("DeepSeek-V4-Pro");
+  });
+
+  it("目录里已有精确裸 ID 时优先选中该行", async () => {
+    await act(async () => {
+      root.render(
+        <BareModelHarness
+          rows={[
+            { id: "gpt-5", label: "Bare GPT-5" },
+            { id: "openai/gpt-5", label: "Composite GPT-5" },
+          ]}
+          selectedId="gpt-5"
+        />,
+      );
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label*="Bare GPT-5"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger!.click());
+    const selected = document.querySelector<HTMLButtonElement>(
+      '[role="radio"][aria-checked="true"]',
+    );
+    expect(selected?.textContent).toContain("Bare GPT-5");
+  });
+
+  it("重复的同一复合 ID 仍能归一化裸选中值", async () => {
+    await act(async () => {
+      root.render(
+        <BareModelHarness
+          rows={[
+            { id: "openai/gpt-5", label: "First GPT-5" },
+            { id: "openai/gpt-5", label: "Second GPT-5" },
+          ]}
+          selectedId="gpt-5"
+        />,
+      );
+    });
+    expect(
+      container.querySelector('button[aria-label*="First GPT-5"]'),
+    ).not.toBeNull();
+  });
+
+  it("已保存的复合 ID 保持原选中行", async () => {
+    await act(async () => {
+      root.render(
+        <BareModelHarness
+          rows={[
+            { id: "gpt-5", label: "Bare GPT-5" },
+            { id: "openai/gpt-5", label: "Composite GPT-5" },
+          ]}
+          selectedId="openai/gpt-5"
+        />,
+      );
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label*="Composite GPT-5"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger!.click());
+    const selected = document.querySelector<HTMLButtonElement>(
+      '[role="radio"][aria-checked="true"]',
+    );
+    expect(selected?.textContent).toContain("Composite GPT-5");
+  });
+
+  it("不同提供商同名模型保持未解析的裸 ID", async () => {
+    await act(async () => {
+      root.render(
+        <BareModelHarness
+          rows={[
+            { id: "openai/gpt-5", label: "OpenAI GPT-5" },
+            { id: "other/gpt-5", label: "Other GPT-5" },
+          ]}
+          selectedId="gpt-5"
+        />,
+      );
+    });
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+    await act(async () => trigger.click());
+    expect(
+      document.querySelector('[role="radio"][aria-checked="true"]'),
+    ).toBeNull();
   });
 });
